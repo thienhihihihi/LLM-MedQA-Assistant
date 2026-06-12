@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-ingestor
+  namespace: model-serving
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: qdrant-ingestor
+          image: qdrant-ingestor:latest
+          imagePullPolicy: Never
+          args:
+            - "--qdrant-url"
+            - "http://qdrant:6333"
+            - "--collection"
+            - "medical_docs"
+            - "--input-path"
+            - "/app/data"
+          volumeMounts:
+            - name: medical-docs
+              mountPath: /app/data
+      volumes:
+        - name: medical-docs
+          configMap:
+            name: medical-docs
