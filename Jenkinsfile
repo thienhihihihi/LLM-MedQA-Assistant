@@ -27,13 +27,19 @@ spec:
       tty: true
 
     - name: docker
-      image: docker:24-dind
+      image: docker:27-cli
       command:
         - cat
       tty: true
+      env:
+        - name: DOCKER_API_VERSION
+          value: "1.53"
       volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
+          readOnly: false
 
     - name: kubectl
       image: bitnami/kubectl:latest
