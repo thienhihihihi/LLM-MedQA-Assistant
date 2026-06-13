@@ -14,7 +14,7 @@ spec:
       hostPath:
         path: /var/run/docker.sock
 
-    - name: workspace
+    - name: workspace-volume
       emptyDir: {}
 
   containers:
@@ -23,6 +23,9 @@ spec:
       image: python:3.11
       command: ["cat"]
       tty: true
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
     - name: docker
       image: docker:27-cli
@@ -34,18 +37,24 @@ spec:
       volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock
-        - name: workspace
+        - name: workspace-volume
           mountPath: /home/jenkins/agent
 
     - name: kubectl
       image: bitnami/kubectl:latest
       command: ["cat"]
       tty: true
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
     - name: checkov
       image: bridgecrew/checkov:latest
       command: ["cat"]
       tty: true
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 """
     }
   }
@@ -64,7 +73,6 @@ spec:
   options {
     timestamps()
     disableConcurrentBuilds()
-    skipDefaultCheckout()
   }
 
   stages {
@@ -78,7 +86,7 @@ spec:
     stage('Preflight Check') {
       steps {
         container('docker') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
             echo "Docker check"
             docker version || true
@@ -87,7 +95,7 @@ spec:
         }
 
         container('kubectl') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
             echo "Kubernetes check"
             kubectl get nodes || true
@@ -101,7 +109,7 @@ spec:
       steps {
         container('python') {
           dir('services/rag-orchestrator') {
-            sh '''
+            sh '''#!/bin/sh
               set -euxo pipefail
 
               python --version
@@ -127,7 +135,7 @@ spec:
     stage('Security Scan') {
       steps {
         container('checkov') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
 
             if [ -d charts ]; then
@@ -143,7 +151,7 @@ spec:
     stage('Build Docker Images') {
       steps {
         container('docker') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
 
             docker build -f services/rag-orchestrator/Dockerfile -t $RAG_IMAGE .
@@ -159,7 +167,7 @@ spec:
     stage('Deploy to Kubernetes') {
       steps {
         container('kubectl') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
 
             kubectl set image deployment/rag-orchestrator \
@@ -181,7 +189,7 @@ spec:
     stage('Smoke Test') {
       steps {
         container('kubectl') {
-          sh '''
+          sh '''#!/bin/sh
             set -euxo pipefail
 
             kubectl get pods -n $HELM_NAMESPACE
@@ -195,7 +203,7 @@ spec:
 
   post {
     success {
-      echo "PIPELINE SUCCESS (PRODUCTION READY)"
+      echo "PIPELINE SUCCESS (STABLE VERSION)"
     }
 
     failure {
