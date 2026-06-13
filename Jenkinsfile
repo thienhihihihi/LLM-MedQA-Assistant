@@ -27,7 +27,7 @@ spec:
       tty: true
 
     - name: docker
-      image: docker:27-cli
+      image: docker:24-dind
       command:
         - cat
       tty: true
