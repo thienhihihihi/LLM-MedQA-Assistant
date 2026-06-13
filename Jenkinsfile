@@ -1,3 +1,10 @@
+def runShell(cmd) {
+  sh """
+    set -euxo pipefail
+    /bin/sh -c '${cmd}'
+  """
+}
+
 pipeline {
   agent {
     kubernetes {
@@ -50,7 +57,6 @@ spec:
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
       tty: true
-
 """
     }
   }
@@ -58,9 +64,9 @@ spec:
   environment {
     HELM_NAMESPACE = 'model-serving'
 
-    RAG_IMAGE      = "rag-orchestrator:${env.BUILD_NUMBER}"
-    UI_IMAGE       = "streamlit-ui:${env.BUILD_NUMBER}"
-    INGEST_IMAGE   = "qdrant-ingestor:${env.BUILD_NUMBER}"
+    RAG_IMAGE    = "rag-orchestrator:${env.BUILD_NUMBER}"
+    UI_IMAGE     = "streamlit-ui:${env.BUILD_NUMBER}"
+    INGEST_IMAGE = "qdrant-ingestor:${env.BUILD_NUMBER}"
 
     PYTHONUNBUFFERED = '1'
     DOCKER_API_VERSION = "1.53"
@@ -79,30 +85,28 @@ spec:
       }
     }
 
-    stage('Preflight - Runtime Check') {
+    stage('Preflight') {
       steps {
         container('docker') {
-          sh '''
-            set -euxo pipefail
-            echo "Docker test start"
-
-            docker version || true
-            docker info || true
-            docker images | head || true
-
-            echo "Docker test done"
-          '''
+          script {
+            runShell("""
+              echo Docker check
+              docker version || true
+              docker info || true
+              docker images | head || true
+            """)
+          }
         }
 
         container('kubectl') {
-          sh '''
-            set -euxo pipefail
-
-            echo "Kubernetes check"
-            kubectl get nodes
-            kubectl get ns
-            kubectl get pods -n ${HELM_NAMESPACE} || true
-          '''
+          script {
+            runShell("""
+              echo Kubernetes check
+              kubectl get nodes || true
+              kubectl get ns || true
+              kubectl get pods -n ${HELM_NAMESPACE} || true
+            """)
+          }
         }
       }
     }
@@ -111,55 +115,56 @@ spec:
       steps {
         container('python') {
           dir('services/rag-orchestrator') {
-            sh '''
-              set -euxo pipefail
+            script {
+              runShell("""
+                python --version
+                pip install --upgrade pip
 
-              python --version
-              pip install --upgrade pip
+                if [ -f requirements.txt ]; then
+                  pip install -r requirements.txt || true
+                fi
 
-              if [ -f requirements.txt ]; then
-                pip install -r requirements.txt || true
-              fi
+                pip install pytest
 
-              pip install pytest
-
-              if [ -d tests ]; then
-                pytest tests -q || true
-              else
-                echo "No tests found"
-              fi
-            '''
+                if [ -d tests ]; then
+                  pytest tests -q || true
+                else
+                  echo No tests
+                fi
+              """)
+            }
           }
         }
       }
     }
 
-    stage('Checkov Scan') {
+    stage('Checkov') {
       steps {
         container('checkov') {
-          sh '''
-            set -euxo pipefail
-
-            if [ -d charts ]; then
-              checkov -d charts --quiet --soft-fail || true
-            fi
-          '''
+          script {
+            runShell("""
+              if [ -d charts ]; then
+                checkov -d charts --soft-fail || true
+              else
+                echo No charts
+              fi
+            """)
+          }
         }
       }
     }
 
-    stage('Build Docker Images') {
+    stage('Build Docker') {
       steps {
         container('docker') {
-          sh '''
-            set -euxo pipefail
-
-            docker build -f services/rag-orchestrator/Dockerfile -t ${RAG_IMAGE} .
-            docker build -f services/streamlit-ui/Dockerfile -t ${UI_IMAGE} .
-            docker build -f services/qdrant-ingestor/Dockerfile -t ${INGEST_IMAGE} .
-
-            docker images | head
-          '''
+          script {
+            runShell("""
+              docker build -f services/rag-orchestrator/Dockerfile -t ${RAG_IMAGE} .
+              docker build -f services/streamlit-ui/Dockerfile -t ${UI_IMAGE} .
+              docker build -f services/qdrant-ingestor/Dockerfile -t ${INGEST_IMAGE} .
+              docker images | head
+            """)
+          }
         }
       }
     }
@@ -167,20 +172,17 @@ spec:
     stage('Deploy') {
       steps {
         container('kubectl') {
-          sh '''
-            set -euxo pipefail
+          script {
+            runShell("""
+              kubectl set image deployment/rag-orchestrator rag-orchestrator=${RAG_IMAGE} -n ${HELM_NAMESPACE} || true
+              kubectl set image deployment/streamlit streamlit=${UI_IMAGE} -n ${HELM_NAMESPACE} || true
 
-            kubectl set image deployment/rag-orchestrator \
-              rag-orchestrator=${RAG_IMAGE} -n ${HELM_NAMESPACE} || true
+              kubectl rollout status deployment/rag-orchestrator -n ${HELM_NAMESPACE} --timeout=300s || true
+              kubectl rollout status deployment/streamlit -n ${HELM_NAMESPACE} --timeout=300s || true
 
-            kubectl set image deployment/streamlit \
-              streamlit=${UI_IMAGE} -n ${HELM_NAMESPACE} || true
-
-            kubectl rollout status deployment/rag-orchestrator -n ${HELM_NAMESPACE} --timeout=300s || true
-            kubectl rollout status deployment/streamlit -n ${HELM_NAMESPACE} --timeout=300s || true
-
-            kubectl get pods -n ${HELM_NAMESPACE}
-          '''
+              kubectl get pods -n ${HELM_NAMESPACE}
+            """)
+          }
         }
       }
     }
@@ -188,13 +190,13 @@ spec:
     stage('Smoke Test') {
       steps {
         container('kubectl') {
-          sh '''
-            set -euxo pipefail
-
-            kubectl get svc -n ${HELM_NAMESPACE}
-            kubectl get pods -n ${HELM_NAMESPACE}
-            kubectl get deploy -n ${HELM_NAMESPACE}
-          '''
+          script {
+            runShell("""
+              kubectl get svc -n ${HELM_NAMESPACE}
+              kubectl get deploy -n ${HELM_NAMESPACE}
+              kubectl get pods -n ${HELM_NAMESPACE}
+            """)
+          }
         }
       }
     }
@@ -202,11 +204,13 @@ spec:
 
   post {
     success {
-      echo "PIPELINE SUCCESS"
+      echo "CI/CD SUCCESS"
     }
+
     failure {
-      echo "PIPELINE FAILED - CHECK LOGS"
+      echo "CI/CD FAILED"
     }
+
     always {
       echo "DONE"
     }
