@@ -15,7 +15,7 @@ spec:
 
   containers:
     - name: python
-      image: python:3.11-slim
+      image: python:3.11
       command:
         - cat
       tty: true
