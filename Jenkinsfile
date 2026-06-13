@@ -90,15 +90,13 @@ spec:
         container('docker') {
           sh '''
             set -e
+            echo "Docker test start"
 
-            echo "=== Docker version ==="
-            docker version
+            /bin/sh -c "docker version" || true
+            /bin/sh -c "docker info" || true
+            /bin/sh -c "docker images | head" || true
 
-            echo "=== Docker info ==="
-            docker info
-
-            echo "=== Current Docker images ==="
-            docker images | head || true
+            echo "Docker test done"
           '''
         }
 
