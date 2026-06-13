@@ -1,11 +1,5 @@
-def safeSh(cmd) {
-  sh """
-    set -euxo pipefail
-    /bin/sh -c '${cmd}'
-  """
-}
-
 pipeline {
+
   agent {
     kubernetes {
       defaultContainer 'python'
@@ -20,18 +14,13 @@ spec:
       hostPath:
         path: /var/run/docker.sock
 
-    - name: workspace-volume
+    - name: workspace
       emptyDir: {}
 
   containers:
 
     - name: python
       image: python:3.11
-      command: ["cat"]
-      tty: true
-
-    - name: checkov
-      image: bridgecrew/checkov:latest
       command: ["cat"]
       tty: true
 
@@ -45,7 +34,7 @@ spec:
       volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock
-        - name: workspace-volume
+        - name: workspace
           mountPath: /home/jenkins/agent
 
     - name: kubectl
@@ -53,6 +42,10 @@ spec:
       command: ["cat"]
       tty: true
 
+    - name: checkov
+      image: bridgecrew/checkov:latest
+      command: ["cat"]
+      tty: true
 """
     }
   }
@@ -60,16 +53,18 @@ spec:
   environment {
     HELM_NAMESPACE = "model-serving"
 
-    RAG_IMAGE    = "rag-orchestrator:${env.BUILD_NUMBER}"
-    UI_IMAGE     = "streamlit-ui:${env.BUILD_NUMBER}"
-    INGEST_IMAGE = "qdrant-ingestor:${env.BUILD_NUMBER}"
+    RAG_IMAGE    = "rag-orchestrator:${BUILD_NUMBER}"
+    UI_IMAGE     = "streamlit-ui:${BUILD_NUMBER}"
+    INGEST_IMAGE = "qdrant-ingestor:${BUILD_NUMBER}"
 
     DOCKER_API_VERSION = "1.53"
+    PYTHONUNBUFFERED = "1"
   }
 
   options {
     timestamps()
     disableConcurrentBuilds()
+    skipDefaultCheckout()
   }
 
   stages {
@@ -80,26 +75,24 @@ spec:
       }
     }
 
-    stage('Preflight') {
+    stage('Preflight Check') {
       steps {
         container('docker') {
-          script {
-            safeSh("""
-              echo 'Docker OK check'
-              docker version || true
-              docker info || true
-            """)
-          }
+          sh '''
+            set -euxo pipefail
+            echo "Docker check"
+            docker version || true
+            docker info || true
+          '''
         }
 
         container('kubectl') {
-          script {
-            safeSh("""
-              echo 'Kubernetes OK check'
-              kubectl get nodes || true
-              kubectl get ns || true
-            """)
-          }
+          sh '''
+            set -euxo pipefail
+            echo "Kubernetes check"
+            kubectl get nodes || true
+            kubectl get ns || true
+          '''
         }
       }
     }
@@ -108,41 +101,41 @@ spec:
       steps {
         container('python') {
           dir('services/rag-orchestrator') {
-            script {
-              safeSh("""
-                python --version
-                pip install --upgrade pip
+            sh '''
+              set -euxo pipefail
 
-                if [ -f requirements.txt ]; then
-                  pip install -r requirements.txt || true
-                fi
+              python --version
+              pip install --upgrade pip
 
-                pip install pytest
+              if [ -f requirements.txt ]; then
+                pip install -r requirements.txt || true
+              fi
 
-                if [ -d tests ]; then
-                  pytest tests -q || true
-                else
-                  echo 'No tests found'
-                fi
-              """)
-            }
+              pip install pytest
+
+              if [ -d tests ]; then
+                pytest tests -q || true
+              else
+                echo "No tests found"
+              fi
+            '''
           }
         }
       }
     }
 
-    stage('Checkov Scan') {
+    stage('Security Scan') {
       steps {
         container('checkov') {
-          script {
-            safeSh("""
-              if [ -d charts ]; then
-                checkov -d charts --soft-fail || true
-              else
-                echo 'No charts directory'
-              fi
-            """)
-          }
+          sh '''
+            set -euxo pipefail
+
+            if [ -d charts ]; then
+              checkov -d charts --soft-fail || true
+            else
+              echo "No charts directory"
+            fi
+          '''
         }
       }
     }
@@ -150,32 +143,37 @@ spec:
     stage('Build Docker Images') {
       steps {
         container('docker') {
-          script {
-            safeSh("""
-              docker build -f services/rag-orchestrator/Dockerfile -t ${RAG_IMAGE} .
-              docker build -f services/streamlit-ui/Dockerfile -t ${UI_IMAGE} .
-              docker build -f services/qdrant-ingestor/Dockerfile -t ${INGEST_IMAGE} .
-            """)
-          }
+          sh '''
+            set -euxo pipefail
+
+            docker build -f services/rag-orchestrator/Dockerfile -t $RAG_IMAGE .
+            docker build -f services/streamlit-ui/Dockerfile -t $UI_IMAGE .
+            docker build -f services/qdrant-ingestor/Dockerfile -t $INGEST_IMAGE .
+
+            docker images | head
+          '''
         }
       }
     }
 
-    stage('Deploy') {
+    stage('Deploy to Kubernetes') {
       steps {
         container('kubectl') {
-          script {
-            safeSh("""
-              kubectl set image deployment/rag-orchestrator \
-                rag-orchestrator=${RAG_IMAGE} -n ${HELM_NAMESPACE} || true
+          sh '''
+            set -euxo pipefail
 
-              kubectl set image deployment/streamlit \
-                streamlit=${UI_IMAGE} -n ${HELM_NAMESPACE} || true
+            kubectl set image deployment/rag-orchestrator \
+              rag-orchestrator=$RAG_IMAGE -n $HELM_NAMESPACE || true
 
-              kubectl rollout status deployment/rag-orchestrator -n ${HELM_NAMESPACE} --timeout=300s || true
-              kubectl rollout status deployment/streamlit -n ${HELM_NAMESPACE} --timeout=300s || true
-            """)
-          }
+            kubectl set image deployment/streamlit \
+              streamlit=$UI_IMAGE -n $HELM_NAMESPACE || true
+
+            kubectl rollout status deployment/rag-orchestrator \
+              -n $HELM_NAMESPACE --timeout=300s || true
+
+            kubectl rollout status deployment/streamlit \
+              -n $HELM_NAMESPACE --timeout=300s || true
+          '''
         }
       }
     }
@@ -183,12 +181,13 @@ spec:
     stage('Smoke Test') {
       steps {
         container('kubectl') {
-          script {
-            safeSh("""
-              kubectl get pods -n ${HELM_NAMESPACE}
-              kubectl get svc -n ${HELM_NAMESPACE}
-            """)
-          }
+          sh '''
+            set -euxo pipefail
+
+            kubectl get pods -n $HELM_NAMESPACE
+            kubectl get svc -n $HELM_NAMESPACE
+            kubectl get deploy -n $HELM_NAMESPACE
+          '''
         }
       }
     }
@@ -196,7 +195,7 @@ spec:
 
   post {
     success {
-      echo "PIPELINE SUCCESS - STABLE VERSION"
+      echo "PIPELINE SUCCESS (PRODUCTION READY)"
     }
 
     failure {
@@ -204,7 +203,7 @@ spec:
     }
 
     always {
-      echo "DONE"
+      echo "PIPELINE FINISHED"
     }
   }
 }
