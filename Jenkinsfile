@@ -84,21 +84,21 @@ spec:
     }
 
     stage('Preflight Check') {
-      steps {
-        sh '''#!/bin/sh
-          set -eux
+  steps {
+    sh '''#!/bin/sh
+      set -eux
 
-          echo "=== Docker check ==="
-          docker version
-          docker info
+      echo "=== Docker check ==="
+      docker version
+      docker info
 
-          echo "=== Kubernetes check ==="
-          kubectl get nodes || true
-          kubectl get ns || true
-          kubectl get pods -n "$HELM_NAMESPACE" || true
-        '''
-      }
-    }
+      echo "=== Kubernetes namespace check ==="
+      kubectl get pods -n "$HELM_NAMESPACE"
+      kubectl get deploy -n "$HELM_NAMESPACE"
+      kubectl get svc -n "$HELM_NAMESPACE"
+    '''
+  }
+}
 
     stage('Unit Tests') {
       steps {
@@ -108,15 +108,13 @@ spec:
 
             echo "=== Python test environment ==="
             python3 --version
+            pip3 --version
 
-            python3 -m venv /tmp/venv
-            . /tmp/venv/bin/activate
-
-            pip install --upgrade pip setuptools wheel
-            pip install pytest pytest-cov
+            echo "=== Install pytest directly ==="
+            pip3 install --break-system-packages pytest pytest-cov
 
             if [ -f requirements.txt ]; then
-              pip install -r requirements.txt || true
+              pip3 install --break-system-packages -r requirements.txt || true
             fi
 
             if [ -d tests ]; then
