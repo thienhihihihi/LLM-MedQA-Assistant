@@ -14,17 +14,24 @@ spec:
       hostPath:
         path: /var/run/docker.sock
 
+    - name: workspace-volume
+      emptyDir: {}
+
   containers:
     - name: ci
-      image: docker:27-cli
+      image: python:3.11-slim
       command: ["cat"]
       tty: true
       env:
         - name: DOCKER_API_VERSION
           value: "1.53"
+        - name: PYTHONUNBUFFERED
+          value: "1"
       volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 """
     }
   }
@@ -59,46 +66,59 @@ spec:
         sh '''#!/bin/sh
           set -eux
 
-          echo "=== Install tools inside single CI container ==="
-
-          apk add --no-cache \
-            bash \
-            curl \
+          echo "=== Install base tools ==="
+          apt-get update
+          apt-get install -y --no-install-recommends \
             ca-certificates \
+            curl \
+            gnupg \
             git \
-            python3 \
-            py3-pip \
-            py3-virtualenv
+            bash
+
+          echo "=== Install Docker CLI 27 ==="
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+
+          apt-get update
+          apt-get install -y --no-install-recommends docker-ce-cli
 
           echo "=== Install kubectl ==="
           curl -L -o /usr/local/bin/kubectl https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl
           chmod +x /usr/local/bin/kubectl
 
+          echo "=== Install Python CI packages ==="
+          python -m pip install --upgrade pip setuptools wheel
+          pip install pytest pytest-cov checkov
+
           echo "=== Verify tools ==="
+          python --version
+          pip --version
           docker version
-          python3 --version
-          pip3 --version
           kubectl version --client
+          checkov --version || true
         '''
       }
     }
 
     stage('Preflight Check') {
-  steps {
-    sh '''#!/bin/sh
-      set -eux
+      steps {
+        sh '''#!/bin/sh
+          set -eux
 
-      echo "=== Docker check ==="
-      docker version
-      docker info
+          echo "=== Docker check ==="
+          docker version
+          docker info
 
-      echo "=== Kubernetes namespace check ==="
-      kubectl get pods -n "$HELM_NAMESPACE"
-      kubectl get deploy -n "$HELM_NAMESPACE"
-      kubectl get svc -n "$HELM_NAMESPACE"
-    '''
-  }
-}
+          echo "=== Kubernetes namespace check ==="
+          kubectl get pods -n "$HELM_NAMESPACE"
+          kubectl get deploy -n "$HELM_NAMESPACE"
+          kubectl get svc -n "$HELM_NAMESPACE"
+        '''
+      }
+    }
 
     stage('Unit Tests') {
       steps {
@@ -107,14 +127,11 @@ spec:
             set -eux
 
             echo "=== Python test environment ==="
-            python3 --version
-            pip3 --version
-
-            echo "=== Install pytest directly ==="
-            pip3 install --break-system-packages pytest pytest-cov
+            python --version
+            pip --version
 
             if [ -f requirements.txt ]; then
-              pip3 install --break-system-packages -r requirements.txt || true
+              pip install -r requirements.txt || true
             fi
 
             if [ -d tests ]; then
@@ -132,9 +149,11 @@ spec:
         sh '''#!/bin/sh
           set -eux
 
-          echo "=== Checkov scan skipped in stable single-container mode ==="
-          echo "Reason: avoiding multi-container Jenkins Kubernetes plugin durable-task bug."
-          echo "You can re-enable Checkov later using a custom CI image."
+          if [ -d charts ]; then
+            checkov -d charts --soft-fail || true
+          else
+            echo "No charts directory"
+          fi
         '''
       }
     }
@@ -144,16 +163,10 @@ spec:
         sh '''#!/bin/sh
           set -eux
 
-          echo "=== Build rag-orchestrator ==="
           docker build -f services/rag-orchestrator/Dockerfile -t "$RAG_IMAGE" .
-
-          echo "=== Build streamlit-ui ==="
           docker build -f services/streamlit-ui/Dockerfile -t "$UI_IMAGE" .
-
-          echo "=== Build qdrant-ingestor ==="
           docker build -f services/qdrant-ingestor/Dockerfile -t "$INGEST_IMAGE" .
 
-          echo "=== Built images ==="
           docker images | grep -E "rag-orchestrator|streamlit-ui|qdrant-ingestor" || true
         '''
       }
@@ -164,10 +177,6 @@ spec:
         sh '''#!/bin/sh
           set -eux
 
-          echo "=== Pods before deploy ==="
-          kubectl get pods -n "$HELM_NAMESPACE" || true
-
-          echo "=== Update rag-orchestrator ==="
           kubectl set image deployment/rag-orchestrator \
             rag-orchestrator="$RAG_IMAGE" \
             -n "$HELM_NAMESPACE"
@@ -176,7 +185,6 @@ spec:
             -n "$HELM_NAMESPACE" \
             -p '{"spec":{"template":{"spec":{"containers":[{"name":"rag-orchestrator","imagePullPolicy":"IfNotPresent"}]}}}}'
 
-          echo "=== Update streamlit ==="
           kubectl set image deployment/streamlit \
             streamlit="$UI_IMAGE" \
             -n "$HELM_NAMESPACE"
@@ -185,26 +193,8 @@ spec:
             -n "$HELM_NAMESPACE" \
             -p '{"spec":{"template":{"spec":{"containers":[{"name":"streamlit","imagePullPolicy":"IfNotPresent"}]}}}}'
 
-          echo "=== Update qdrant-ingestor if exists ==="
-          if kubectl get deployment qdrant-ingestor -n "$HELM_NAMESPACE" >/dev/null 2>&1; then
-            kubectl set image deployment/qdrant-ingestor \
-              qdrant-ingestor="$INGEST_IMAGE" \
-              -n "$HELM_NAMESPACE"
-
-            kubectl patch deployment qdrant-ingestor \
-              -n "$HELM_NAMESPACE" \
-              -p '{"spec":{"template":{"spec":{"containers":[{"name":"qdrant-ingestor","imagePullPolicy":"IfNotPresent"}]}}}}'
-          else
-            echo "qdrant-ingestor deployment not found. Skip."
-          fi
-
-          echo "=== Wait rollout ==="
           kubectl rollout status deployment/rag-orchestrator -n "$HELM_NAMESPACE" --timeout=300s
           kubectl rollout status deployment/streamlit -n "$HELM_NAMESPACE" --timeout=300s
-
-          if kubectl get deployment qdrant-ingestor -n "$HELM_NAMESPACE" >/dev/null 2>&1; then
-            kubectl rollout status deployment/qdrant-ingestor -n "$HELM_NAMESPACE" --timeout=300s
-          fi
         '''
       }
     }
@@ -214,14 +204,9 @@ spec:
         sh '''#!/bin/sh
           set -eux
 
-          echo "=== Services ==="
-          kubectl get svc -n "$HELM_NAMESPACE"
-
-          echo "=== Deployments ==="
-          kubectl get deploy -n "$HELM_NAMESPACE"
-
-          echo "=== Pods ==="
           kubectl get pods -n "$HELM_NAMESPACE" -o wide
+          kubectl get svc -n "$HELM_NAMESPACE"
+          kubectl get deploy -n "$HELM_NAMESPACE"
         '''
       }
     }
@@ -229,7 +214,7 @@ spec:
 
   post {
     success {
-      echo "PIPELINE SUCCESS - SINGLE CONTAINER STABLE MODE"
+      echo "PIPELINE SUCCESS"
     }
 
     failure {
